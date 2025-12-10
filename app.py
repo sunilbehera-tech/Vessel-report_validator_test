@@ -117,7 +117,8 @@ def validate_reports(df):
         "Ballast Transfer [MT]",
         "Fresh Water Prod. [MT]",
         "Others [MT]",
-        "EGCS Consumption [MT]"
+        "EGCS Consumption [MT]",
+        "Cyl. Oil Cons. [Ltrs]"  # Added for SCOC calculation
     ]
     for col in numeric_cols:
         if col in df.columns:
@@ -146,6 +147,14 @@ def validate_reports(df):
     )
     df["SFOC"] = df["SFOC"].fillna(0)
 
+    # --- Calculate SCOC in g/kWh ---
+    df["SCOC"] = (
+        df["Cyl. Oil Cons. [Ltrs]"] * 1000
+        / (df["Average Load [kW]"].replace(0, np.nan)
+           * df["ME Rhrs (From Last Report)"].replace(0, np.nan))
+    )
+    df["SCOC"] = df["SCOC"].fillna(0)
+
     reasons = []
     fail_columns = set()
 
@@ -155,6 +164,7 @@ def validate_reports(df):
         ME_Rhrs = row.get("ME Rhrs (From Last Report)", 0)
         report_hours = row.get("Report Hours", 0)
         sfoc = row.get("SFOC", 0)
+        scoc = row.get("SCOC", 0)
         avg_speed = row.get("Avg. Speed", 0)
 
         # --- Rule 1: SFOC (only for At Sea) ---
@@ -235,6 +245,18 @@ def validate_reports(df):
                 fail_columns.add("Tank Cleaning [MT]")
                 fail_columns.add("Cargo Transfer [MT]")
 
+        # --- Rule 6: SCOC (Specific Cylinder Oil Consumption) - only for At Sea ---
+        if report_type == "At Sea" and ME_Rhrs > 12:
+            if scoc > 0:  # Only validate if SCOC was calculated (i.e., not zero/missing data)
+                if scoc < 0.8:
+                    reason.append(f"SCOC ({scoc:.2f} g/kWh) is lower than normal range (0.8-1.5 g/kWh)")
+                    fail_columns.add("SCOC")
+                    fail_columns.add("Cyl. Oil Cons. [Ltrs]")
+                elif scoc > 1.5:
+                    reason.append(f"SCOC ({scoc:.2f} g/kWh) is higher than normal range (0.8-1.5 g/kWh)")
+                    fail_columns.add("SCOC")
+                    fail_columns.add("Cyl. Oil Cons. [Ltrs]")
+
         reasons.append("; ".join(reason))
 
     df["Reason"] = reasons
@@ -265,6 +287,8 @@ def validate_reports(df):
         "Average Load [%]",
         "ME Rhrs (From Last Report)",
         "Report Hours",
+        "Cyl. Oil Cons. [Ltrs]",  # Added for SCOC context
+        "SCOC",  # Added calculated SCOC column
     ]
 
     # Combine all columns and remove duplicates while preserving order
@@ -452,6 +476,12 @@ def main():
         - If AE Rhrs/Report Hours > 1.25 (indicating 2+ AEs running)
         - All sub-consumers must not be zero
         - Validates proper reporting of tank cleaning, cargo operations, etc.
+        
+        **Rule 6: SCOC (Specific Cylinder Oil Consumption)**
+        - At Sea (ME Rhrs > 12): 0.8–1.5 g/kWh
+        - Formula: [Cyl. Oil Cons. [Ltrs] × 1000] / [Average Load [kW] × ME Rhrs]
+        - Flags if lower or higher than normal range
+        - At Port/Anchorage: No validation
         
         **Report Hours Calculation**
         - Calculated as: (End Date/Time - Start Date/Time) + Time Shift
@@ -776,8 +806,8 @@ def main():
             st.success("🎉 All reports passed validation!")
             st.balloons()
         
-        # Option to view all data with SFOC and Report Hours
-        with st.expander("🔍 View All Data (with calculated SFOC and Report Hours)"):
+        # Option to view all data with SFOC, SCOC and Report Hours
+        with st.expander("🔍 View All Data (with calculated SFOC, SCOC and Report Hours)"):
             st.dataframe(df_with_calcs, use_container_width=True, height=400)
             
             # Download all data
@@ -805,6 +835,7 @@ def main():
             - Start Date, Start Time, End Date, End Time, Time Shift
             - Average Load [kW], ME Rhrs (From Last Report), Avg. Speed
             - Fuel Cons. [MT] (ME Cons 1, 2, 3)
+            - Cyl. Oil Cons. [Ltrs] (for SCOC calculation)
             - Exh. Temp [°C] (Main Engine Unit 1-16)
             - A.E. 1-6 Last Report [Rhrs] (Aux Engine Units)
             - Sub-consumer fields: Tank Cleaning, Cargo Transfer, etc.
