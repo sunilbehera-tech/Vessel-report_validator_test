@@ -2,32 +2,15 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import io
-import base64
-import json
-from datetime import datetime, timedelta
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import Flow
-from googleapiclient.discovery import build
+import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
 from email import encoders
-import win32com.client as win32
-import pythoncom
+from datetime import datetime
 
-# OAuth2 Configuration for Gmail
-GMAIL_SCOPES = ['https://www.googleapis.com/auth/gmail.send']
-GMAIL_CLIENT_CONFIG = {
-    "web": {
-        "client_id": "YOUR_GMAIL_CLIENT_ID.apps.googleusercontent.com",
-        "project_id": "your-project-id",
-        "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-        "token_uri": "https://oauth2.googleapis.com/token",
-        "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
-        "client_secret": "YOUR_GMAIL_CLIENT_SECRET",
-        "redirect_uris": ["http://localhost:8501"]
-    }
-}
+# NOTE: This version uses standard SMTP (no OAuth dependencies)
+# For OAuth support, install: google-auth-oauthlib, google-api-python-client, pywin32
 
 @st.cache_data
 def calculate_report_hours_from_data(start_dates, end_dates, start_times, end_times, time_shifts):
@@ -36,24 +19,19 @@ def calculate_report_hours_from_data(start_dates, end_dates, start_times, end_ti
     
     for idx in range(len(start_dates)):
         try:
-            # Get date and time components
             start_date = pd.to_datetime(start_dates[idx], errors='coerce')
             end_date = pd.to_datetime(end_dates[idx], errors='coerce')
             
-            # Get time components (handle various formats)
             start_time = str(start_times[idx] if idx < len(start_times) else "00:00:00").strip()
             end_time = str(end_times[idx] if idx < len(end_times) else "00:00:00").strip()
             
-            # Handle time shift (convert to hours)
             time_shift = time_shifts[idx] if idx < len(time_shifts) else 0
             if pd.isna(time_shift):
                 time_shift = 0
             else:
                 time_shift = float(time_shift)
             
-            # Create datetime objects
             if pd.notna(start_date) and pd.notna(end_date):
-                # Parse time strings
                 try:
                     start_time_obj = pd.to_datetime(start_time, format='%H:%M:%S').time()
                 except:
@@ -70,22 +48,18 @@ def calculate_report_hours_from_data(start_dates, end_dates, start_times, end_ti
                     except:
                         end_time_obj = datetime.strptime("00:00:00", '%H:%M:%S').time()
                 
-                # Combine date and time
                 start_datetime = datetime.combine(start_date.date(), start_time_obj)
                 end_datetime = datetime.combine(end_date.date(), end_time_obj)
                 
-                # Calculate time difference
                 time_diff = end_datetime - start_datetime
                 hours_diff = time_diff.total_seconds() / 3600
-                
-                # Add time shift
                 total_hours = hours_diff + time_shift
                 
                 report_hours.append(round(total_hours, 2))
             else:
                 report_hours.append(0)
                 
-        except Exception as e:
+        except:
             report_hours.append(0)
     
     return report_hours
@@ -100,71 +74,43 @@ def calculate_report_hours(df):
     time_shifts = df.get("Time Shift", pd.Series([0]*len(df))).tolist()
     
     return calculate_report_hours_from_data(
-        tuple(start_dates), 
-        tuple(end_dates), 
-        tuple(start_times), 
-        tuple(end_times), 
-        tuple(time_shifts)
+        tuple(start_dates), tuple(end_dates), tuple(start_times), tuple(end_times), tuple(time_shifts)
     )
 
 @st.cache_data(show_spinner=False, hash_funcs={pd.DataFrame: lambda x: x.to_json()})
 def validate_reports(df):
-    """Validate ship reports and return failed rows with reasons"""
+    """Validate ship reports with all 6 rules including SCOC"""
     df = df.copy()
     
-    # --- Clean numeric columns ---
     numeric_cols = [
-        "Average Load [kW]",
-        "ME Rhrs (From Last Report)",
-        "Avg. Speed",
-        "Fuel Cons. [MT] (ME Cons 1)",
-        "Fuel Cons. [MT] (ME Cons 2)",
-        "Fuel Cons. [MT] (ME Cons 3)",
-        "Time Shift",
-        "Average Load [%]",
-        "A.E. 1 Last Report [Rhrs] (Aux Engine Unit 1)",
-        "A.E. 2 Last Report [Rhrs] (Aux Engine Unit 2)",
-        "A.E. 3 Last Report [Rhrs] (Aux Engine Unit 3)",
-        "A.E. 4 Total [Rhrs] (Aux Engine Unit 4)",
-        "A.E. 5 Last Report [Rhrs] (Aux Engine Unit 5)",
-        "A.E. 6 Last Report [Rhrs] (Aux Engine Unit 6)",
-        "Tank Cleaning [MT]",
-        "Cargo Transfer [MT]",
-        "Maintaining Cargo Temp. [MT]",
-        "Shaft Gen. Propulsion [MT]",
-        "Raising Cargo Temp. [MT]",
-        "Burning Sludge [MT]",
-        "Ballast Transfer [MT]",
-        "Fresh Water Prod. [MT]",
-        "Others [MT]",
-        "EGCS Consumption [MT]"
+        "Average Load [kW]", "ME Rhrs (From Last Report)", "Avg. Speed",
+        "Fuel Cons. [MT] (ME Cons 1)", "Fuel Cons. [MT] (ME Cons 2)", "Fuel Cons. [MT] (ME Cons 3)",
+        "Time Shift", "Average Load [%]",
+        "A.E. 1 Last Report [Rhrs] (Aux Engine Unit 1)", "A.E. 2 Last Report [Rhrs] (Aux Engine Unit 2)",
+        "A.E. 3 Last Report [Rhrs] (Aux Engine Unit 3)", "A.E. 4 Total [Rhrs] (Aux Engine Unit 4)",
+        "A.E. 5 Last Report [Rhrs] (Aux Engine Unit 5)", "A.E. 6 Last Report [Rhrs] (Aux Engine Unit 6)",
+        "Tank Cleaning [MT]", "Cargo Transfer [MT]", "Maintaining Cargo Temp. [MT]",
+        "Shaft Gen. Propulsion [MT]", "Raising Cargo Temp. [MT]", "Burning Sludge [MT]",
+        "Ballast Transfer [MT]", "Fresh Water Prod. [MT]", "Others [MT]", "EGCS Consumption [MT]",
+        "Cyl. Oil Cons. [Ltrs]"
     ]
+    
     for col in numeric_cols:
         if col in df.columns:
-            df[col] = (
-                df[col]
-                .astype(str)
-                .str.replace(",", "")
-                .str.strip()
-                .replace(["", "nan", "None"], np.nan)
-            )
+            df[col] = df[col].astype(str).str.replace(",", "").str.strip().replace(["", "nan", "None"], np.nan)
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
 
-    # --- Calculate Report Hours ---
     df["Report Hours"] = calculate_report_hours(df)
-
-    # --- Calculate SFOC in g/kWh ---
+    
     df["SFOC"] = (
-        (
-            df["Fuel Cons. [MT] (ME Cons 1)"]
-            + df["Fuel Cons. [MT] (ME Cons 2)"]
-            + df["Fuel Cons. [MT] (ME Cons 3)"]
-        )
-        * 1_000_000
-        / (df["Average Load [kW]"].replace(0, np.nan)
-           * df["ME Rhrs (From Last Report)"].replace(0, np.nan))
-    )
-    df["SFOC"] = df["SFOC"].fillna(0)
+        (df["Fuel Cons. [MT] (ME Cons 1)"] + df["Fuel Cons. [MT] (ME Cons 2)"] + df["Fuel Cons. [MT] (ME Cons 3)"]) * 1_000_000
+        / (df["Average Load [kW]"].replace(0, np.nan) * df["ME Rhrs (From Last Report)"].replace(0, np.nan))
+    ).fillna(0)
+
+    df["SCOC"] = (
+        df["Cyl. Oil Cons. [Ltrs]"] * 1000
+        / (df["Average Load [kW]"].replace(0, np.nan) * df["ME Rhrs (From Last Report)"].replace(0, np.nan))
+    ).fillna(0)
 
     reasons = []
     fail_columns = set()
@@ -175,27 +121,22 @@ def validate_reports(df):
         ME_Rhrs = row.get("ME Rhrs (From Last Report)", 0)
         report_hours = row.get("Report Hours", 0)
         sfoc = row.get("SFOC", 0)
+        scoc = row.get("SCOC", 0)
         avg_speed = row.get("Avg. Speed", 0)
 
-        # --- Rule 1: SFOC (only for At Sea) ---
-        if report_type == "At Sea" and ME_Rhrs > 12:
-            if not (150 <= sfoc <= 200):
-                reason.append("SFOC out of 150-200 at sea with ME Rhrs > 12")
-                fail_columns.add("SFOC")
+        # Rule 1: SFOC
+        if report_type == "At Sea" and ME_Rhrs > 12 and not (150 <= sfoc <= 200):
+            reason.append("SFOC out of 150-200 at sea with ME Rhrs > 12")
+            fail_columns.add("SFOC")
 
-        # --- Rule 2: Avg Speed (only for At Sea) ---
-        if report_type == "At Sea" and ME_Rhrs > 12:
-            if not (0 <= avg_speed <= 20):
-                reason.append("Avg. Speed out of 0-20 at sea with ME Rhrs > 12")
-                fail_columns.add("Avg. Speed")
+        # Rule 2: Avg Speed
+        if report_type == "At Sea" and ME_Rhrs > 12 and not (0 <= avg_speed <= 20):
+            reason.append("Avg. Speed out of 0-20 at sea with ME Rhrs > 12")
+            fail_columns.add("Avg. Speed")
 
-        # --- Rule 3: Exhaust Temp deviation (Units 1-16, only At Sea) ---
+        # Rule 3: Exhaust Temp deviation
         if report_type == "At Sea" and ME_Rhrs > 12:
-            exhaust_cols = [
-                f"Exh. Temp [°C] (Main Engine Unit {j})"
-                for j in range(1, 17)
-                if f"Exh. Temp [°C] (Main Engine Unit {j})" in df.columns
-            ]
+            exhaust_cols = [f"Exh. Temp [°C] (Main Engine Unit {j})" for j in range(1, 17) if f"Exh. Temp [°C] (Main Engine Unit {j})" in df.columns]
             temps = [row[c] for c in exhaust_cols if pd.notna(row[c]) and row[c] != 0]
             if temps:
                 avg_temp = np.mean(temps)
@@ -205,899 +146,210 @@ def validate_reports(df):
                         reason.append(f"Exhaust temp deviation > ±50 from avg at Unit {j}")
                         fail_columns.add(c)
 
-        # --- Rule 4: ME Rhrs should not exceed Report Hours (with ±1 hour margin) ---
-        if report_hours > 0:
+        # Rule 4: ME Rhrs vs Report Hours
+        if report_hours > 0 and (ME_Rhrs - report_hours) > 1.0:
             hours_diff = ME_Rhrs - report_hours
-            if hours_diff > 1.0:
-                reason.append(f"ME Rhrs ({ME_Rhrs:.2f}) exceeds Report Hours ({report_hours:.2f}) by {hours_diff:.2f}h (margin: ±1h)")
-                fail_columns.add("ME Rhrs (From Last Report)")
-                fail_columns.add("Report Hours")
+            reason.append(f"ME Rhrs ({ME_Rhrs:.2f}) exceeds Report Hours ({report_hours:.2f}) by {hours_diff:.2f}h")
+            fail_columns.update(["ME Rhrs (From Last Report)", "Report Hours"])
 
-        # --- Rule 5: Multiple Aux Engines operating at sea without sub-consumers ---
+        # Rule 5: Aux Engines & Sub-Consumers
         if report_type == "At Sea" and row.get("Average Load [%]", 0) > 40:
-            # Sum all auxiliary engine running hours
-            ae_rhrs_sum = (
-                row.get("A.E. 1 Last Report [Rhrs] (Aux Engine Unit 1)", 0) +
-                row.get("A.E. 2 Last Report [Rhrs] (Aux Engine Unit 2)", 0) +
-                row.get("A.E. 3 Last Report [Rhrs] (Aux Engine Unit 3)", 0) +
-                row.get("A.E. 4 Total [Rhrs] (Aux Engine Unit 4)", 0) +
-                row.get("A.E. 5 Last Report [Rhrs] (Aux Engine Unit 5)", 0) +
-                row.get("A.E. 6 Last Report [Rhrs] (Aux Engine Unit 6)", 0)
-            )
+            ae_rhrs_sum = sum([row.get(f"A.E. {i} Last Report [Rhrs] (Aux Engine Unit {i})", 0) for i in range(1, 4)])
+            ae_rhrs_sum += sum([row.get(f"A.E. {i} {'Total' if i==4 else 'Last Report'} [Rhrs] (Aux Engine Unit {i})", 0) for i in range(4, 7)])
             
-            # Calculate AE running hours ratio
-            if report_hours > 0:
-                ae_ratio = ae_rhrs_sum / report_hours
-            else:
-                ae_ratio = 0
+            ae_ratio = ae_rhrs_sum / report_hours if report_hours > 0 else 0
+            sub_consumers_sum = sum([row.get(f"{c} [MT]", 0) for c in ["Tank Cleaning", "Cargo Transfer", "Maintaining Cargo Temp.", "Shaft Gen. Propulsion", "Raising Cargo Temp.", "Burning Sludge", "Ballast Transfer", "Fresh Water Prod.", "Others", "EGCS Consumption"]])
             
-            # Sum all sub-consumers
-            sub_consumers_sum = (
-                row.get("Tank Cleaning [MT]", 0) +
-                row.get("Cargo Transfer [MT]", 0) +
-                row.get("Maintaining Cargo Temp. [MT]", 0) +
-                row.get("Shaft Gen. Propulsion [MT]", 0) +
-                row.get("Raising Cargo Temp. [MT]", 0) +
-                row.get("Burning Sludge [MT]", 0) +
-                row.get("Ballast Transfer [MT]", 0) +
-                row.get("Fresh Water Prod. [MT]", 0) +
-                row.get("Others [MT]", 0) +
-                row.get("EGCS Consumption [MT]", 0)
-            )
-            
-            # Check if 2+ Aux Engines operating (ratio > 1.25) with ME Load > 40% and no sub-consumers
             if ae_ratio > 1.25 and sub_consumers_sum == 0:
-                reason.append(f"Multiple Aux Engines operating at sea (AE Rhrs/Report Hours = {ae_ratio:.2f}) with ME Load > 40% but no sub-consumers reported. Please confirm operations and update sub-consumption fields if applicable")
-                fail_columns.add("Average Load [%]")
-                fail_columns.add("A.E. 1 Last Report [Rhrs] (Aux Engine Unit 1)")
-                fail_columns.add("A.E. 2 Last Report [Rhrs] (Aux Engine Unit 2)")
-                fail_columns.add("A.E. 3 Last Report [Rhrs] (Aux Engine Unit 3)")
-                fail_columns.add("Tank Cleaning [MT]")
-                fail_columns.add("Cargo Transfer [MT]")
+                reason.append(f"Multiple AEs (ratio={ae_ratio:.2f}) with ME Load>40% but no sub-consumers")
+                fail_columns.update(["Average Load [%]", "A.E. 1 Last Report [Rhrs] (Aux Engine Unit 1)", "Tank Cleaning [MT]"])
+
+        # Rule 6: SCOC
+        if report_type == "At Sea" and ME_Rhrs > 12 and scoc > 0:
+            if scoc < 0.8:
+                reason.append(f"SCOC ({scoc:.2f} g/kWh) below normal range (0.8-1.5)")
+                fail_columns.update(["SCOC", "Cyl. Oil Cons. [Ltrs]"])
+            elif scoc > 1.5:
+                reason.append(f"SCOC ({scoc:.2f} g/kWh) above normal range (0.8-1.5)")
+                fail_columns.update(["SCOC", "Cyl. Oil Cons. [Ltrs]"])
 
         reasons.append("; ".join(reason))
 
     df["Reason"] = reasons
     failed = df[df["Reason"] != ""].copy()
 
-    # --- Always include Ship Name and Exhaust Temp columns ---
-    exhaust_cols = [
-        f"Exh. Temp [°C] (Main Engine Unit {j})"
-        for j in range(1, 17)
-        if f"Exh. Temp [°C] (Main Engine Unit {j})" in df.columns
-    ]
+    exhaust_cols = [f"Exh. Temp [°C] (Main Engine Unit {j})" for j in range(1, 17) if f"Exh. Temp [°C] (Main Engine Unit {j})" in df.columns]
+    context_cols = ["Ship Name", "IMO_No", "Report Type", "Start Date", "Start Time", "End Date", "End Time", "Voyage Number", "Time Zone", "Distance - Ground [NM]", "Time Shift", "Distance - Sea [NM]", "Average Load [kW]", "Average RPM", "Average Load [%]", "ME Rhrs (From Last Report)", "Report Hours", "Cyl. Oil Cons. [Ltrs]", "SCOC"]
 
-    context_cols = [
-        "Ship Name",
-        "IMO_No",
-        "Report Type",
-        "Start Date",
-        "Start Time",
-        "End Date",
-        "End Time",
-        "Voyage Number",
-        "Time Zone",
-        "Distance - Ground [NM]",
-        "Time Shift",
-        "Distance - Sea [NM]",
-        "Average Load [kW]",
-        "Average RPM",
-        "Average Load [%]",
-        "ME Rhrs (From Last Report)",
-        "Report Hours",
-    ]
-
-    # Combine all columns and remove duplicates while preserving order
     cols_to_keep = context_cols + exhaust_cols + list(fail_columns) + ["Reason"]
-    
-    # Remove duplicates while preserving order
-    seen = set()
     cols_to_keep_unique = []
+    seen = set()
     for col in cols_to_keep:
         if col not in seen and col in failed.columns:
             seen.add(col)
             cols_to_keep_unique.append(col)
     
-    # Move Ship Name to Column A
     if "Ship Name" in cols_to_keep_unique:
         cols_to_keep_unique.remove("Ship Name")
         cols_to_keep_unique = ["Ship Name"] + cols_to_keep_unique
 
-    failed = failed[cols_to_keep_unique]
-
-    return failed, df
+    return failed[cols_to_keep_unique] if not failed.empty else failed, df
 
 
-def get_gmail_service():
-    """Get Gmail API service using OAuth2 credentials from session state"""
-    if 'gmail_credentials' not in st.session_state or st.session_state.gmail_credentials is None:
-        return None
-    
-    creds = Credentials.from_authorized_user_info(st.session_state.gmail_credentials, GMAIL_SCOPES)
-    service = build('gmail', 'v1', credentials=creds)
-    return service
-
-
-def get_outlook_accounts():
-    """Get list of available Outlook accounts"""
+def send_email(smtp_server, smtp_port, sender_email, sender_password, recipient_emails, subject, body, attachment_data=None, attachment_name="Failed_Validation.xlsx", cc_emails=None):
+    """Send email via SMTP"""
     try:
-        pythoncom.CoInitialize()
-        outlook = win32.Dispatch('outlook.application')
-        accounts = []
-        for account in outlook.Session.Accounts:
-            try:
-                email = account.SmtpAddress
-            except:
-                email = account.DisplayName
-            accounts.append(email)
-        return accounts
-    except Exception as e:
-        return []
-
-
-def send_email_gmail(recipient_emails, subject, body, attachment_data=None, 
-                    attachment_name="Failed_Validation.xlsx", cc_emails=None):
-    """Send email using Gmail API with OAuth2"""
-    try:
-        service = get_gmail_service()
-        if not service:
-            return False, "Not authenticated with Gmail. Please sign in."
+        msg = MIMEMultipart()
+        msg['From'] = sender_email
         
-        message = MIMEMultipart()
+        recipient_list = [e.strip() for e in recipient_emails.split(',')] if isinstance(recipient_emails, str) else recipient_emails
+        msg['To'] = ', '.join(recipient_list)
         
-        # Handle recipient emails
-        if isinstance(recipient_emails, str):
-            recipient_list = [email.strip() for email in recipient_emails.split(',') if email.strip()]
-        else:
-            recipient_list = recipient_emails
-        
-        message['To'] = ', '.join(recipient_list)
-        
-        # Handle CC emails
         cc_list = []
         if cc_emails:
-            if isinstance(cc_emails, str):
-                cc_list = [email.strip() for email in cc_emails.split(',') if email.strip()]
-            else:
-                cc_list = cc_emails
+            cc_list = [e.strip() for e in cc_emails.split(',')] if isinstance(cc_emails, str) else cc_emails
             if cc_list:
-                message['Cc'] = ', '.join(cc_list)
+                msg['Cc'] = ', '.join(cc_list)
         
-        message['Subject'] = subject
-        message.attach(MIMEText(body, 'html'))
+        msg['Subject'] = subject
+        msg.attach(MIMEText(body, 'html'))
         
-        # Attach file if provided
         if attachment_data:
             part = MIMEBase('application', 'octet-stream')
             part.set_payload(attachment_data.getvalue())
             encoders.encode_base64(part)
             part.add_header('Content-Disposition', f'attachment; filename={attachment_name}')
-            message.attach(part)
+            msg.attach(part)
         
-        # Create raw message
-        raw_message = base64.urlsafe_b64encode(message.as_bytes()).decode('utf-8')
+        server = smtplib.SMTP(smtp_server, smtp_port)
+        server.starttls()
+        server.login(sender_email, sender_password)
+        server.sendmail(sender_email, recipient_list + cc_list, msg.as_string())
+        server.quit()
         
-        # Send email
-        service.users().messages().send(
-            userId='me',
-            body={'raw': raw_message}
-        ).execute()
-        
-        return True, "Email sent successfully via Gmail!"
+        return True, "Email sent successfully!"
     except Exception as e:
-        return False, f"Failed to send email via Gmail: {str(e)}"
-
-
-def send_email_outlook_local(recipient_emails, subject, body, attachment_data=None,
-                             attachment_name="Failed_Validation.xlsx", cc_emails=None, sender_account=None):
-    """Send email using local Outlook Desktop App via pywin32"""
-    try:
-        pythoncom.CoInitialize()
-        outlook = win32.Dispatch('outlook.application')
-        mail = outlook.CreateItem(0)
-        
-        def add_recipients(email_input, type_id):
-            if not email_input: return 0
-            
-            email_list = []
-            if isinstance(email_input, str):
-                cleaned = email_input.replace('\n', ';').replace(',', ';')
-                email_list = [e.strip() for e in cleaned.split(';') if e.strip()]
-            else:
-                email_list = email_input
-            
-            for email in email_list:
-                try:
-                    recipient = mail.Recipients.Add(email)
-                    recipient.Type = type_id
-                    recipient.Resolve()
-                except Exception as e:
-                    st.error(f"Error adding recipient '{email}': {e}")
-            return len(email_list)
-
-        add_recipients(recipient_emails, 1)
-        add_recipients(cc_emails, 2)
-        
-        # Remove unresolved recipients
-        removed_count = 0
-        for i in range(mail.Recipients.Count, 0, -1):
-            try:
-                recipient = mail.Recipients.Item(i)
-                if not recipient.Resolved:
-                    st.warning(f"⚠️ Removing unresolved recipient: {recipient.Name}")
-                    recipient.Delete()
-                    removed_count += 1
-            except Exception as e:
-                st.error(f"Error checking recipient {i}: {e}")
-        
-        if removed_count > 0:
-            st.info(f"ℹ️ Removed {removed_count} invalid recipients to ensure sending.")
-
-        if mail.Recipients.Count == 0:
-             return False, "❌ No valid recipients found after cleanup. Please check email addresses."
-        
-        mail.Subject = subject
-        mail.HTMLBody = body
-        
-        # Set Sender Account
-        if sender_account:
-            found = False
-            for i in range(outlook.Session.Accounts.Count):
-                account = outlook.Session.Accounts.Item(i + 1)
-                
-                acc_email = ""
-                try:
-                    acc_email = account.SmtpAddress
-                except:
-                    acc_email = account.DisplayName
-                
-                if acc_email and sender_account and acc_email.lower() == sender_account.lower():
-                    try:
-                        try:
-                            mail._oleobj_.Invoke(*(64209, 0, 8, 0, account))
-                        except Exception as invoke_e:
-                            mail.SendUsingAccount = account
-
-                        mail.Save() 
-                        found = True
-                    except Exception as e:
-                        st.error(f"Error setting account: {e}")
-                    break
-            
-            if not found:
-                st.warning(f"⚠️ Could not find Outlook account matching: '{sender_account}'. Sending with default.")
-        
-        # Add attachment if provided
-        if attachment_data:
-            import tempfile
-            import os
-            
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
-                tmp.write(attachment_data.getvalue())
-                tmp_path = tmp.name
-                
-            try:
-                attachment = mail.Attachments.Add(tmp_path)
-                attachment.DisplayName = attachment_name
-                mail.Send()
-                return True, "Email sent successfully via Outlook Desktop!"
-            finally:
-                if os.path.exists(tmp_path):
-                    os.unlink(tmp_path)
-        else:
-            mail.Send()
-            return True, "Email sent successfully via Outlook Desktop!"
-            
-    except Exception as e:
-        return False, f"Failed to send email via Outlook Desktop: {str(e)}. Ensure Outlook is open and logged in."
-
-
-def send_email(recipient_emails, subject, body, attachment_data=None,
-               attachment_name="Failed_Validation.xlsx", cc_emails=None):
-    """Send email using the authenticated provider (Gmail or Outlook)"""
-    if 'email_provider' not in st.session_state:
-        return False, "No email provider authenticated"
-    
-    if st.session_state.email_provider == 'gmail':
-        return send_email_gmail(recipient_emails, subject, body, attachment_data, 
-                                attachment_name, cc_emails)
-    elif st.session_state.email_provider == 'outlook':
-        sender_account = st.session_state.get('outlook_account')
-        return send_email_outlook_local(recipient_emails, subject, body, attachment_data,
-                                  attachment_name, cc_emails, sender_account)
-    else:
-        return False, "Unknown email provider"
+        return False, f"Failed: {str(e)}"
 
 
 def create_email_body(ship_name, failed_count, reasons_summary):
-    """Create HTML email body"""
-    body = f"""
-    <html>
-        <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
-            <h2 style="color: #2c3e50;">Vessel Report Validation Alert</h2>
-            
-            <p>Dear Captain and C/E of <strong>{ship_name}</strong>,</p>
-            
-            <p>This is an automated notification regarding recent validation failures in your vessel reports.</p>
-            
-            <div style="background-color: #fff3cd; border-left: 4px solid #ffc107; padding: 15px; margin: 20px 0;">
-                <h3 style="margin-top: 0; color: #856404;">Validation Summary</h3>
-                <p><strong>Failed Reports:</strong> {failed_count}</p>
-            </div>
-            
-            <h3>Common Issues Detected:</h3>
-            <ul>
-    {reasons_summary}
-            </ul>
-            
-            <p>Please review the attached Excel file for detailed information about the failed validations.</p>
-            
-            <h4 style="color: #2c3e50;">Action Required:</h4>
-            <ol>
-                <li>Review the attached report carefully</li>
-                <li>Correct the identified issues</li>
-                <li>Resubmit corrected reports</li>
-                <li>Contact the technical team if you need assistance</li>
-            </ol>
-            
-            <hr style="border: none; border-top: 1px solid #ddd; margin: 30px 0;">
-            
-            <p style="color: #7f8c8d; font-size: 0.9em;">
-                For any queries, please contact us at <strong><a href="mailto:smartapp@enginelink.blue">smartapp@enginelink.blue</a></strong>
-            </p>
-            
-            <p style="color: #7f8c8d; font-size: 0.85em; margin-top: 10px;">
-                This is an automated message. Generated on {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}
-            </p>
-        </body>
-    </html>
-    """
-    return body
+    return f"""<html><body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+        <h2 style="color: #2c3e50;">Vessel Report Validation Alert</h2>
+        <p>Dear Captain and C/E of <strong>{ship_name}</strong>,</p>
+        <p>Automated notification regarding validation failures in your vessel reports.</p>
+        <div style="background-color: #fff3cd; border-left: 4px solid #ffc107; padding: 15px; margin: 20px 0;">
+            <h3 style="margin-top: 0; color: #856404;">Validation Summary</h3>
+            <p><strong>Failed Reports:</strong> {failed_count}</p>
+        </div>
+        <h3>Common Issues Detected:</h3>
+        <ul>{reasons_summary}</ul>
+        <p>Review the attached Excel file for details.</p>
+        <hr style="border: none; border-top: 1px solid #ddd; margin: 30px 0;">
+        <p style="color: #7f8c8d; font-size: 0.9em;">Contact: <strong><a href="mailto:smartapp@enginelink.blue">smartapp@enginelink.blue</a></strong></p>
+        <p style="color: #7f8c8d; font-size: 0.85em;">Generated on {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}</p>
+    </body></html>"""
+
 
 @st.cache_data(show_spinner=False)
 def process_excel_file(file_bytes, file_name):
-    """Process uploaded Excel file and return validation results"""
     df = pd.read_excel(io.BytesIO(file_bytes), sheet_name="All Reports")
     failed, df_with_calcs = validate_reports(df)
-    
-    return (
-        df.to_dict('records'),
-        df.columns.tolist(),
-        failed.to_dict('records') if not failed.empty else [],
-        failed.columns.tolist() if not failed.empty else [],
-        df_with_calcs.to_dict('records'),
-        df_with_calcs.columns.tolist()
-    )
+    return (df.to_dict('records'), df.columns.tolist(), failed.to_dict('records') if not failed.empty else [], failed.columns.tolist() if not failed.empty else [], df_with_calcs.to_dict('records'), df_with_calcs.columns.tolist())
 
 
 def main():
-    st.set_page_config(
-        page_title="Ship Report Validator",
-        page_icon="🚢",
-        layout="wide"
-    )
+    st.set_page_config(page_title="Ship Report Validator", page_icon="🚢", layout="wide")
     
-    # Initialize session state
-    if 'validation_done' not in st.session_state:
-        st.session_state.validation_done = False
-    if 'failed_df' not in st.session_state:
-        st.session_state.failed_df = None
-    if 'df_with_calcs' not in st.session_state:
-        st.session_state.df_with_calcs = None
-    if 'original_df' not in st.session_state:
-        st.session_state.original_df = None
-    if 'gmail_credentials' not in st.session_state:
-        st.session_state.gmail_credentials = None
-    if 'user_email' not in st.session_state:
-        st.session_state.user_email = None
-    if 'email_provider' not in st.session_state:
-        st.session_state.email_provider = None
-    if 'outlook_account' not in st.session_state:
-        st.session_state.outlook_account = None
+    for key in ['validation_done', 'failed_df', 'df_with_calcs', 'original_df']:
+        if key not in st.session_state:
+            st.session_state[key] = False if key == 'validation_done' else None
     
     st.title("🚢 Ship Report Validation System")
-    st.markdown("Upload your Excel file to validate ship reports and send automated alerts")
+    st.markdown("Upload Excel file to validate ship reports (includes SCOC validation)")
     
-    # Sidebar
     with st.sidebar:
-        st.header("🔐 Authentication")
-        
-        is_authenticated = (st.session_state.gmail_credentials is not None or 
-                          st.session_state.email_provider == 'outlook')
-        
-        if not is_authenticated:
-            st.info("📧 Sign in with your email provider to send notifications")
-            
-            email_provider = st.radio(
-                "Choose Email Provider:",
-                ["Gmail", "Outlook Desktop App"],
-                horizontal=True
-            )
-            
-            with st.expander("📧 Setup Instructions", expanded=False):
-                if email_provider == "Gmail":
-                    st.markdown("""
-                    ### Google Cloud Setup:
-                    1. Go to [Google Cloud Console](https://console.cloud.google.com/)
-                    2. Create a new project or select existing
-                    3. Enable **Gmail API**
-                    4. Create **OAuth 2.0 credentials** (Web application)
-                    5. Add `http://localhost:8501` to authorized redirect URIs
-                    6. Copy Client ID and Client Secret
-                    7. Update GMAIL_CLIENT_CONFIG in the code
-                    
-                    **No admin access needed!** Each user authenticates with their own Google account.
-                    """)
-                else:
-                    st.markdown("""
-                    ### Outlook Desktop Setup:
-                    
-                    **No setup required!** 
-                    
-                    This option uses your locally installed Outlook application.
-                    
-                    **Requirements:**
-                    1. Outlook Desktop App must be installed
-                    2. You must be logged in to Outlook
-                    3. Outlook should be open (recommended)
-                    
-                    The app will automatically trigger Outlook to send emails.
-                    """)
-            
-            st.divider()
-            
-            if email_provider == "Gmail":
-                if st.button("🔑 Sign in with Google", type="primary", use_container_width=True):
-                    try:
-                        flow = Flow.from_client_config(
-                            GMAIL_CLIENT_CONFIG,
-                            scopes=GMAIL_SCOPES,
-                            redirect_uri='http://localhost:8501'
-                        )
-                        
-                        auth_url, _ = flow.authorization_url(prompt='consent')
-                        
-                        st.markdown(f"### [Click here to authorize]({auth_url})")
-                        st.info("After authorizing, copy the code from the URL and paste below")
-                        
-                    except Exception as e:
-                        st.error(f"Failed to start OAuth flow: {str(e)}")
-                
-                auth_code = st.text_input("Authorization Code", type="password", key="gmail_code")
-                
-                if auth_code and st.button("✅ Complete Gmail Sign In"):
-                    try:
-                        flow = Flow.from_client_config(
-                            GMAIL_CLIENT_CONFIG,
-                            scopes=GMAIL_SCOPES,
-                            redirect_uri='http://localhost:8501'
-                        )
-                        flow.fetch_token(code=auth_code)
-                        credentials = flow.credentials
-                        
-                        st.session_state.gmail_credentials = {
-                            'token': credentials.token,
-                            'refresh_token': credentials.refresh_token,
-                            'token_uri': credentials.token_uri,
-                            'client_id': credentials.client_id,
-                            'client_secret': credentials.client_secret,
-                            'scopes': credentials.scopes
-                        }
-                        
-                        service = build('gmail', 'v1', credentials=credentials)
-                        profile = service.users().getProfile(userId='me').execute()
-                        st.session_state.user_email = profile['emailAddress']
-                        st.session_state.email_provider = 'gmail'
-                        
-                        st.success(f"✅ Signed in as {st.session_state.user_email}")
-                        st.rerun()
-                        
-                    except Exception as e:
-                        st.error(f"Gmail authentication failed: {str(e)}")
-            
-            else:
-                st.markdown("### Outlook Desktop Setup")
-                
-                accounts = get_outlook_accounts()
-                
-                if accounts:
-                    selected_account = st.selectbox(
-                        "Select Sender Account:",
-                        accounts,
-                        index=0 if accounts else None
-                    )
-                    
-                    if st.button("✅ Use Selected Account", type="primary", use_container_width=True):
-                        st.session_state.email_provider = 'outlook'
-                        st.session_state.outlook_account = selected_account
-                        st.session_state.user_email = selected_account
-                        st.success(f"✅ Selected: {selected_account}")
-                        st.rerun()
-                else:
-                    st.error("No Outlook accounts found. Please ensure Outlook is configured.")
-                    if st.button("Retry fetching accounts"):
-                        st.rerun()
-        
-        else:
-            provider_name = "Gmail" if st.session_state.email_provider == 'gmail' else "Outlook"
-            st.success(f"✅ Signed in with {provider_name}")
-            st.info(f"**Email:** {st.session_state.user_email}")
-            
-            if st.button("🚪 Sign Out", use_container_width=True):
-                st.session_state.gmail_credentials = None
-                st.session_state.user_email = None
-                st.session_state.email_provider = None
-                st.session_state.outlook_account = None
-                st.rerun()
-            
-            if st.session_state.email_provider == 'outlook':
-                st.divider()
-                if st.button("📧 Send Test Email", help="Send a test email to yourself"):
-                    sender = st.session_state.get('outlook_account')
-                    if sender:
-                        success, msg = send_email_outlook_local(
-                            recipient_emails=sender,
-                            subject="Test Email from Ship Validator",
-                            body=f"This is a test email sent from <b>{sender}</b>.",
-                            sender_account=sender
-                        )
-                        if success:
-                            st.success(msg)
-                        else:
-                            st.error(msg)
-                    else:
-                        st.error("No sender account found in session.")
-        
-        st.divider()
-        
         st.header("📋 Validation Rules")
         st.markdown("""
-        **Rule 1: SFOC (Specific Fuel Oil Consumption)**
-        - At Sea (ME Rhrs > 12): 150–200 g/kWh
-        - At Port/Anchorage: No validation
-        
-        **Rule 2: Average Speed**
-        - At Sea (ME Rhrs > 12): 0–20 knots
-        - At Port/Anchorage: No validation
-        
-        **Rule 3: Exhaust Temperature**
-        - At Sea (ME Rhrs > 12): Deviation ≤ ±50°C from average
-        - Applies to Units 1-16
-        - At Port/Anchorage: No validation
-        
-        **Rule 4: ME Running Hours**
-        - ME Rhrs must not exceed Report Hours by more than 1 hour
-        - Tolerance: ±1 hour margin
-        
-        **Rule 5: Auxiliary Engines & Sub-Consumers**
-        - At Sea with ME Load > 40%
-        - If AE Rhrs/Report Hours > 1.25 (indicating 2+ AEs running)
-        - All sub-consumers must not be zero
-        - Validates proper reporting of tank cleaning, cargo operations, etc.
-        
-        **Report Hours Calculation**
-        - Calculated as: (End Date/Time - Start Date/Time) + Time Shift
+        **Rule 1:** SFOC 150–200 g/kWh (At Sea, ME Rhrs > 12)
+        **Rule 2:** Avg Speed 0–20 knots (At Sea, ME Rhrs > 12)
+        **Rule 3:** Exhaust Temp ±50°C deviation (At Sea, ME Rhrs > 12)
+        **Rule 4:** ME Rhrs ≤ Report Hours + 1h
+        **Rule 5:** AE/Sub-consumers check (At Sea, ME Load > 40%)
+        **Rule 6:** SCOC 0.8–1.5 g/kWh (At Sea, ME Rhrs > 12)
         """)
+        st.divider()
+        st.header("📧 SMTP Settings")
+        with st.expander("Configure Email"):
+            smtp_server = st.text_input("SMTP Server", value="smtp.gmail.com")
+            smtp_port = st.number_input("Port", value=587, min_value=1)
+            sender_email = st.text_input("Sender Email")
+            sender_password = st.text_input("Password", type="password", help="Use App Password for Gmail")
     
-    # File uploader
-    uploaded_file = st.file_uploader(
-        "Choose an Excel file",
-        type=["xlsx", "xls"],
-        help="Upload the weekly data dump Excel file"
-    )
+    uploaded_file = st.file_uploader("Choose Excel file", type=["xlsx", "xls"])
     
-    # Reset validation when new file is uploaded
-    if uploaded_file is not None:
+    if uploaded_file:
         file_id = f"{uploaded_file.name}_{uploaded_file.size}"
-        
         if 'current_file_id' not in st.session_state or st.session_state.current_file_id != file_id:
-            st.session_state.current_file_id = file_id
-            st.session_state.validation_done = False
-            st.session_state.failed_df = None
-            st.session_state.df_with_calcs = None
-            st.session_state.original_df = None
+            st.session_state.update({'current_file_id': file_id, 'validation_done': False, 'failed_df': None, 'df_with_calcs': None, 'original_df': None})
     
-    # Run validation only once when file is uploaded
-    if uploaded_file is not None and not st.session_state.validation_done:
+    if uploaded_file and not st.session_state.validation_done:
         try:
-            file_bytes = uploaded_file.read()
-            file_name = uploaded_file.name
-            
-            with st.spinner("Loading and validating file..."):
-                df_data, df_cols, failed_data, failed_cols, calc_data, calc_cols = process_excel_file(file_bytes, file_name)
-                
-                df = pd.DataFrame(df_data, columns=df_cols)
-                failed = pd.DataFrame(failed_data, columns=failed_cols) if failed_data else pd.DataFrame()
-                df_with_calcs = pd.DataFrame(calc_data, columns=calc_cols)
-                
-                st.session_state.original_df = df
-                st.session_state.failed_df = failed
-                st.session_state.df_with_calcs = df_with_calcs
+            with st.spinner("Validating..."):
+                df_data, df_cols, failed_data, failed_cols, calc_data, calc_cols = process_excel_file(uploaded_file.read(), uploaded_file.name)
+                st.session_state.original_df = pd.DataFrame(df_data, columns=df_cols)
+                st.session_state.failed_df = pd.DataFrame(failed_data, columns=failed_cols) if failed_data else pd.DataFrame()
+                st.session_state.df_with_calcs = pd.DataFrame(calc_data, columns=calc_cols)
                 st.session_state.validation_done = True
-            
-            st.success(f"✅ File loaded and validated! Total rows: {len(df)}")
-            
+            st.success(f"✅ Validated! Total rows: {len(st.session_state.original_df)}")
         except Exception as e:
-            st.error(f"❌ Error processing file: {str(e)}")
-            st.exception(e)
+            st.error(f"❌ Error: {str(e)}")
     
-    # Display results if validation is done
     if st.session_state.validation_done:
-        df = st.session_state.original_df
-        failed = st.session_state.failed_df
-        df_with_calcs = st.session_state.df_with_calcs
+        df, failed = st.session_state.original_df, st.session_state.failed_df
         
-        # Show column info
-        with st.expander("📊 Dataset Information"):
-            st.write(f"**Rows:** {len(df)}")
-            st.write(f"**Columns:** {len(df.columns)}")
-            st.write("**Column Names:**")
-            st.write(df.columns.tolist())
-        
-        st.header("📈 Validation Results")
-        
+        st.header("📈 Results")
         col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("Total Reports", len(df))
-        with col2:
-            st.metric("Failed Reports", len(failed))
-        with col3:
-            pass_rate = ((len(df) - len(failed)) / len(df) * 100) if len(df) > 0 else 0
-            st.metric("Pass Rate", f"{pass_rate:.1f}%")
+        col1.metric("Total", len(df))
+        col2.metric("Failed", len(failed))
+        col3.metric("Pass Rate", f"{((len(df)-len(failed))/len(df)*100):.1f}%")
         
         if not failed.empty:
-            st.warning(f"⚠️ {len(failed)} reports failed validation")
-            
-            st.subheader("Failed Reports")
+            st.warning(f"⚠️ {len(failed)} failed")
             st.dataframe(failed, use_container_width=True, height=400)
             
-            # Failure reasons summary
-            with st.expander("📊 Failure Reasons Summary"):
-                reasons_list = []
-                for reason_str in failed["Reason"]:
-                    if reason_str:
-                        reasons_list.extend(reason_str.split("; "))
-                
-                if reasons_list:
-                    reason_counts = pd.Series(reasons_list).value_counts()
-                    st.bar_chart(reason_counts)
-                    st.write(reason_counts)
-            
-            # Create Excel file for download/email
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                failed.to_excel(writer, index=False, sheet_name="Failed_Validation")
+                failed.to_excel(writer, index=False, sheet_name="Failed")
             output.seek(0)
+            st.download_button("📥 Download Failed", output, "Failed_Validation.xlsx")
             
-            st.download_button(
-                label="📥 Download Failed Reports",
-                data=output,
-                file_name="Failed_Validation.xlsx",
-                mime="application/vnd.openxmlx-officedocument.spreadsheetml.sheet"
-            )
-            
-            # Email Section - only if authenticated
-            if st.session_state.email_provider:
-                st.divider()
-                st.header("📧 Send Email Notifications")
-                
-                if "Ship Name" in failed.columns:
-                    vessels = failed["Ship Name"].unique()
-                    
-                    tab1, tab2 = st.tabs(["📤 Send to Specific Vessels", "📨 Bulk Send to All"])
-                    
-                    with tab1:
-                        st.markdown("### Send validation report to specific vessels")
-                        
-                        with st.form("single_vessel_form"):
-                            selected_vessel = st.selectbox("Select Vessel", vessels)
+            st.divider()
+            if "Ship Name" in failed.columns:
+                vessels = failed["Ship Name"].unique()
+                with st.form("email_form"):
+                    vessel = st.selectbox("Select Vessel", vessels)
+                    to_email = st.text_area("To:", placeholder="email@company.com")
+                    cc_email = st.text_area("CC (optional):", placeholder="cc@company.com")
+                    if st.form_submit_button("📤 Send Email"):
+                        if not sender_email or not sender_password:
+                            st.error("Configure SMTP settings")
+                        elif to_email:
+                            vessel_failed = failed[failed["Ship Name"] == vessel]
+                            v_output = io.BytesIO()
+                            with pd.ExcelWriter(v_output, engine='openpyxl') as w:
+                                vessel_failed.to_excel(w, index=False)
+                            v_output.seek(0)
                             
-                            st.markdown("**Recipient Emails** (comma-separated for multiple)")
-                            vessel_email = st.text_area("To:", 
-                                                         placeholder="vessel1@company.com, vessel2@company.com",
-                                                         key="single_vessel_email",
-                                                         height=80)
+                            reasons_html = "\n".join([f"<li>{r} ({c}x)</li>" for r, c in pd.Series([r for rs in vessel_failed["Reason"] for r in rs.split("; ") if r]).value_counts().items()])
                             
-                            st.markdown("**CC Emails** (optional, comma-separated)")
-                            vessel_cc = st.text_area("CC:", 
-                                                      placeholder="manager@company.com, office@company.com",
-                                                      key="single_vessel_cc",
-                                                      height=80)
-                            
-                            submit_button = st.form_submit_button("📤 Send Email to Selected Vessel", type="primary")
-                        
-                        if submit_button:
-                            if not vessel_email:
-                                st.error("Please enter at least one recipient email address")
-                            else:
-                                vessel_failed = failed[failed["Ship Name"] == selected_vessel]
-                                
-                                vessel_output = io.BytesIO()
-                                with pd.ExcelWriter(vessel_output, engine='openpyxl') as writer:
-                                    vessel_failed.to_excel(writer, index=False, 
-                                                          sheet_name="Failed_Validation")
-                                vessel_output.seek(0)
-                                
-                                vessel_reasons = []
-                                for reason_str in vessel_failed["Reason"]:
-                                    if reason_str:
-                                        vessel_reasons.extend(reason_str.split("; "))
-                                
-                                reasons_html = ""
-                                if vessel_reasons:
-                                    reason_counts = pd.Series(vessel_reasons).value_counts()
-                                    for reason, count in reason_counts.items():
-                                        reasons_html += f"<li>{reason} ({count} occurrence{'s' if count > 1 else ''})</li>\n"
-                                
-                                subject = f"Vessel Report Validation Alert - {selected_vessel}"
-                                body = create_email_body(selected_vessel, len(vessel_failed), reasons_html)
-                                
-                                with st.spinner("Sending email..."):
-                                    success, message = send_email(
-                                        vessel_email, subject, body, vessel_output,
-                                        f"Failed_Validation_{selected_vessel}.xlsx",
-                                        cc_emails=vessel_cc if vessel_cc else None
-                                    )
-                                
-                                if success:
-                                    st.success(f"✅ {message}")
-                                else:
-                                    st.error(f"❌ {message}")
-                    
-                    with tab2:
-                        st.markdown("### Send validation reports to all vessels with failures")
-                        
-                        st.info(f"📊 {len(vessels)} vessel(s) have validation failures")
-                        
-                        email_mapping_file = st.file_uploader(
-                            "Upload Vessel Email Mapping (Excel/CSV)",
-                            type=["xlsx", "xls", "csv"],
-                            help="File should have columns: 'Ship Name', 'Email' (or 'To'), and optionally 'CC1', 'CC2', 'CC3', etc.",
-                            key="email_mapping"
-                        )
-                        
-                        if email_mapping_file:
-                            try:
-                                if email_mapping_file.name.endswith('.csv'):
-                                    email_df = pd.read_csv(email_mapping_file)
-                                else:
-                                    email_df = pd.read_excel(email_mapping_file)
-                                
-                                st.success(f"✅ Loaded {len(email_df)} vessel email mappings")
-                                st.dataframe(email_df.head(), use_container_width=True)
-                                
-                                if "Ship Name" not in email_df.columns:
-                                    st.error("❌ Email mapping file must have 'Ship Name' column")
-                                elif "Email" not in email_df.columns and "To" not in email_df.columns:
-                                    st.error("❌ Email mapping file must have 'Email' or 'To' column")
-                                else:
-                                    email_col = "Email" if "Email" in email_df.columns else "To"
-                                    
-                                    cc_columns = [col for col in email_df.columns if col.upper().startswith('CC')]
-                                    if cc_columns:
-                                        st.info(f"📧 Found CC columns: {', '.join(cc_columns)}")
-                                    
-                                    if st.button("📨 Send Emails to All Vessels", type="primary"):
-                                        progress_bar = st.progress(0)
-                                        status_container = st.container()
-                                        
-                                        results = []
-                                        for idx, vessel in enumerate(vessels):
-                                            vessel_email_row = email_df[email_df["Ship Name"] == vessel]
-                                            
-                                            if vessel_email_row.empty:
-                                                results.append(f"❌ {vessel}: No email found in mapping")
-                                                continue
-                                            
-                                            vessel_email = vessel_email_row.iloc[0][email_col]
-                                            
-                                            if pd.isna(vessel_email) or str(vessel_email).strip() == "":
-                                                results.append(f"❌ {vessel}: Email is empty")
-                                                continue
-                                            
-                                            cc_emails_list = []
-                                            for cc_col in cc_columns:
-                                                cc_val = vessel_email_row.iloc[0].get(cc_col)
-                                                if pd.notna(cc_val) and str(cc_val).strip():
-                                                    cc_emails_list.extend([e.strip() for e in str(cc_val).split(',') if e.strip()])
-                                            
-                                            cc_emails_str = ', '.join(cc_emails_list) if cc_emails_list else None
-                                            
-                                            vessel_failed = failed[failed["Ship Name"] == vessel]
-                                            vessel_output = io.BytesIO()
-                                            with pd.ExcelWriter(vessel_output, engine='openpyxl') as writer:
-                                                vessel_failed.to_excel(writer, index=False, 
-                                                                      sheet_name="Failed_Validation")
-                                            vessel_output.seek(0)
-                                            
-                                            vessel_reasons = []
-                                            for reason_str in vessel_failed["Reason"]:
-                                                if reason_str:
-                                                    vessel_reasons.extend(reason_str.split("; "))
-                                            
-                                            reasons_html = ""
-                                            if vessel_reasons:
-                                                reason_counts = pd.Series(vessel_reasons).value_counts()
-                                                for reason, count in reason_counts.items():
-                                                    reasons_html += f"<li>{reason} ({count} occurrence{'s' if count > 1 else ''})</li>\n"
-                                            
-                                            subject = f"Vessel Report Validation Alert - {vessel}"
-                                            body = create_email_body(vessel, len(vessel_failed), reasons_html)
-                                            
-                                            success, message = send_email(
-                                                vessel_email, subject, body, vessel_output,
-                                                f"Failed_Validation_{vessel}.xlsx",
-                                                cc_emails=cc_emails_str
-                                            )
-                                            
-                                            if success:
-                                                cc_info = f" (CC: {len(cc_emails_list)} recipients)" if cc_emails_list else ""
-                                                results.append(f"✅ {vessel}: Email sent successfully{cc_info}")
-                                            else:
-                                                results.append(f"❌ {vessel}: {message}")
-                                            
-                                            progress_bar.progress((idx + 1) / len(vessels))
-                                        
-                                        with status_container:
-                                            st.subheader("Email Sending Results")
-                                            for result in results:
-                                                st.write(result)
-                                
-                            except Exception as e:
-                                st.error(f"Error loading email mapping: {str(e)}")
-                        else:
-                            st.info("👆 Upload a vessel email mapping file to enable bulk sending")
-                else:
-                    st.warning("⚠️ 'Ship Name' column not found. Cannot send vessel-specific emails.")
-            else:
-                st.info("🔐 Please sign in with your email provider to send notifications")
-        
+                            success, msg = send_email(smtp_server, smtp_port, sender_email, sender_password, to_email, f"Validation Alert - {vessel}", create_email_body(vessel, len(vessel_failed), reasons_html), v_output, f"Failed_{vessel}.xlsx", cc_email)
+                            st.success(msg) if success else st.error(msg)
         else:
-            st.success("🎉 All reports passed validation!")
+            st.success("🎉 All passed!")
             st.balloons()
-        
-        # Option to view all data with SFOC and Report Hours
-        with st.expander("🔍 View All Data (with calculated SFOC and Report Hours)"):
-            st.dataframe(df_with_calcs, use_container_width=True, height=400)
-            
-            output_all = io.BytesIO()
-            with pd.ExcelWriter(output_all, engine='openpyxl') as writer:
-                df_with_calcs.to_excel(writer, index=False, sheet_name="All_Reports_Processed")
-            output_all.seek(0)
-            
-            st.download_button(
-                label="📥 Download All Data with Calculations",
-                data=output_all,
-                file_name="All_Reports_With_Calculations.xlsx",
-                mime="application/vnd.openxmlx-officedocument.spreadsheetml.sheet"
-            )
     
-    elif uploaded_file is None:
-        st.info("👆 Please upload an Excel file to begin validation")
-        
-        with st.expander("📄 Expected Data Structure"):
-            st.markdown("""
-            **Main Excel File** should contain a sheet named **"All Reports"** with columns:
-            
-            - Ship Name, IMO_No, Report Type (At Sea / At Port / At Anchorage)
-            - Start Date, Start Time, End Date, End Time, Time Shift
-            - Average Load [kW], ME Rhrs (From Last Report), Avg. Speed
-            - Fuel Cons. [MT] (ME Cons 1, 2, 3)
-            - Exh. Temp [°C] (Main Engine Unit 1-16)
-            - A.E. 1-6 Last Report [Rhrs] (Aux Engine Units)
-            - Sub-consumer fields: Tank Cleaning, Cargo Transfer, etc.
-            
-            **Email Mapping File** (for bulk sending):
-            - Must have columns: `Ship Name` and `Email` (or `To`)
-            - Optional CC columns: `CC1`, `CC2`, `CC3`, etc.
-            - You can add multiple emails in one cell using commas
-            - Example:
-            
-            | Ship Name | Email | CC1 | CC2 |
-            |-----------|-------|-----|-----|
-            | Vessel A  | captain@vessel-a.com, chief@vessel-a.com | manager@company.com | office@company.com |
-            | Vessel B  | vesselb@company.com | supervisor@company.com | admin@company.com |
-            """)
+    elif not uploaded_file:
+        st.info("👆 Upload Excel file to begin")
 
 
 if __name__ == "__main__":
